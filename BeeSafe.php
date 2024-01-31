@@ -80,6 +80,7 @@ function login_attempt_tracker_failed_login($username) {
             ['%s', '%s', '%d', '%s']
         );
     }
+    send_login_attempt_to_api($username, $ip_address, current_time('mysql', 1));
 }
 
 
