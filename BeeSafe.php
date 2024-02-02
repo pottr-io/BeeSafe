@@ -9,6 +9,9 @@ License: GPL2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
 */
+define('WP_DEBUG', true);
+define('WP_DEBUG_LOG', true);
+define('WP_DEBUG_DISPLAY', true);
 
 define('ICON_URL', plugins_url('pottr-logo.svg', __FILE__));
 
@@ -37,23 +40,41 @@ add_action('wp_login_failed', 'login_attempt_tracker_failed_login');
 
 function login_attempt_tracker_failed_login($username) {
     global $wpdb;
-    $table_name = $wpdb->prefix . 'login_attempts'; // This is generally safe since it's based on known, controlled strings
+    $table_name = $wpdb->prefix . 'login_attempts';
     $ip_address = $_SERVER['REMOTE_ADDR'];
     $max_attempts = get_option('beesafe_settings')['beesafe_field_attempts'];
     $lockout_duration = get_option('beesafe_settings')['beesafe_field_timeout']; // Assuming timeout is stored in minutes
+
+    // Check if the IP address is locked out
+    $lockout_expires = $wpdb->get_var($wpdb->prepare(
+        "SELECT lockout_expires FROM $table_name WHERE ip_address = %s",
+        $ip_address
+    ));
+
+    if ($lockout_expires && current_time('mysql', 1) < $lockout_expires) {
+        wp_die('Too many login attempts. Please try again later.');
+    }
 
     // Inline preparation and execution to satisfy the plugin checker, even though it's less readable
     $recent_attempt = $wpdb->get_row($wpdb->prepare(
         "SELECT id, attempt_count, attempt_time FROM $table_name WHERE ip_address = %s AND username = %s ORDER BY attempt_time DESC LIMIT 1",
         $ip_address, $username
     ));
-
     $current_time = current_time('mysql', 1);
     if ($recent_attempt) {
         $time_diff = strtotime($current_time) - strtotime($recent_attempt->attempt_time);
 
         if ($time_diff < $lockout_duration * 60) { // Convert minutes to seconds
             if ($recent_attempt->attempt_count >= $max_attempts) {
+                // Lock the IP address and set lockout_expires time
+                $lockout_expires = gmdate('Y-m-d H:i:s', strtotime($current_time) + ($lockout_duration * 60));
+                $wpdb->update(
+                    $table_name,
+                    ['lockout_expires' => $lockout_expires],
+                    ['ip_address' => $ip_address],
+                    ['%s'],
+                    ['%s']
+                );
                 wp_die('Too many login attempts. Please try again later.');
             } else {
                 $wpdb->update(
@@ -81,8 +102,23 @@ function login_attempt_tracker_failed_login($username) {
         );
     }
     send_login_attempt_to_api($username, $ip_address, current_time('mysql', 1));
+
 }
 
+
+function login_attempt_tracker_update_table() {
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'login_attempts';
+
+    $row = $wpdb->get_results("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name = '$table_name' AND column_name = 'attempt_count'");
+  
+    if(empty($row)){
+       $wpdb->query("ALTER TABLE $table_name ADD attempt_count int(11) DEFAULT 0 NOT NULL");
+    }
+}
+
+// Call this function at an appropriate place, such as plugin activation or initialization
+login_attempt_tracker_update_table();
 
 
 function send_login_attempt_to_api($username, $ip_address, $attempt_time) {
@@ -103,7 +139,7 @@ function send_login_attempt_to_api($username, $ip_address, $attempt_time) {
         'httpversion' => '1.0',
         'blocking' => true,
         'headers' => [],
-        'body' => wp_json_encode($body),
+        'body' => json_encode($body),
         'cookies' => [],
     ];
 
